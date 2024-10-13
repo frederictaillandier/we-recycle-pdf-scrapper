@@ -1,22 +1,16 @@
 use chrono::{self, DateTime, Datelike, TimeZone};
 use pdf_extract;
 use regex::Regex;
+use reqwest::blocking::Client;
 
-fn extract_text_from_pdf(path: &str) -> String {
-    match pdf_extract::extract_text(path) {
-        Ok(text) => text,
-        Err(e) => {
-            println!("Error: {}", e);
-            String::new()
-        }
-    }
-}
-
-fn extract_dates_from_txt(text: &str) -> Vec<DateTime<chrono::Local>> {
+fn extract_dates_from_txt(
+    text: String,
+) -> Result<Vec<DateTime<chrono::Local>>, Box<dyn std::error::Error>> {
     let mut result = Vec::new();
-    let re = Regex::new(r"(\d{1,2}\.\d{1,2}\.)\s+([A-Z]{2})\s*([\d\s\+\-]+(?:\s+\d+\s*-\s*\d+)?(?:\s+\d+\s*-\s*\d+)*)?\s+").unwrap();
+    let regex = r"(\d{1,2}\.\d{1,2}\.)\s+([A-Z]{2})\s*([\d\s\+\-]+(?:\s+\d+\s*-\s*\d+)?(?:\s+\d+\s*-\s*\d+)*)?\s+";
+    let re = Regex::new(regex)?;
 
-    for caps in re.captures_iter(text) {
+    for caps in re.captures_iter(&text) {
         let date = &caps[1];
 
         if (&caps).len() < 4 || caps.get(3).is_none() {
@@ -35,7 +29,7 @@ fn extract_dates_from_txt(text: &str) -> Vec<DateTime<chrono::Local>> {
                     result.push(dt);
                 }
                 Err(e) => {
-                    println!("Error: {}", e);
+                    println!("Error parsing date: e {} datetime {:?}", e, datetime);
                 }
             }
         }
@@ -49,14 +43,43 @@ fn extract_dates_from_txt(text: &str) -> Vec<DateTime<chrono::Local>> {
         })
         .collect();
 
-    localized_result
+    Ok(localized_result)
 }
 
-fn main() {
-    // Path to the uploaded PDF file
-    let pdf_path = "Abholplan-Oktober-Dezember-2024.pdf";
-    let extracted_text = extract_text_from_pdf(pdf_path);
-    let extracted_dates = extract_dates_from_txt(&extracted_text);
+fn download_pdf() -> Result<String, Box<dyn std::error::Error>> {
+    let url = "https://www.werecycle.ch/en/abholdaten/";
+    let client = Client::new();
+    let response = client.get(url).send()?;
 
+    let body = response.text()?;
+    let re = Regex::new(r#"href="([^"]+\.pdf)""#)?;
+    let caps = re
+        .captures(&body)
+        .unwrap_or_else(|| panic!("no pdf link found on we-recycle page"));
+    let pdf_url = caps
+        .get(1)
+        .unwrap_or_else(|| panic!("pdf url somehow corrupted"))
+        .as_str();
+    let pdf_response = client.get(pdf_url).send()?;
+
+    let pdf_bytes = pdf_response.bytes().unwrap_or_else(|e| {
+        panic!(
+            "Error while casting the we-recycle pdf to text {}: {}",
+            pdf_url, e
+        )
+    });
+    let pdf_text = pdf_extract::extract_text_from_mem(&pdf_bytes).unwrap_or_else(|e| {
+        panic!(
+            "Error while extracting text from the we-recycle pdf {}: {}",
+            pdf_url, e
+        )
+    });
+    return Ok(pdf_text);
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let we_recycle_schedule_text = download_pdf()?;
+    let extracted_dates = extract_dates_from_txt(we_recycle_schedule_text);
     println!("{:?}", extracted_dates);
+    Ok(())
 }
